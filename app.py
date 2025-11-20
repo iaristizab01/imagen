@@ -1,20 +1,78 @@
 import os
+import time
 import streamlit as st
 import base64
 from openai import OpenAI
 import openai
-#from PIL import Image
-import tensorflow as tf
-from PIL import Image, ImageOps
+from PIL import Image
 import numpy as np
-import pandas as pd
-import matplotlib.pyplot as plt
-import streamlit as st
+from gtts import gTTS
 from streamlit_drawable_canvas import st_canvas
+import json
+import paho.mqtt.client as paho
 
-Expert=" "
-profile_imgenh=" "
-    
+# ============================
+# Fondo de la app
+# ============================
+def set_background(image_file: str):
+    """Pone una imagen de fondo en toda la app de Streamlit."""
+    with open(image_file, "rb") as f:
+        encoded = base64.b64encode(f.read()).decode()
+    st.markdown(
+        f"""
+        <style>
+        .stApp {{
+            background-image: url("data:image/png;base64,{encoded}");
+            background-size: cover;
+            background-position: center;
+            background-repeat: no-repeat;
+        }}
+        </style>
+        """,
+        unsafe_allow_html=True
+    )
+
+# ============================
+# Config MQTT (ajusta si hace falta)
+# ============================
+BROKER = "157.230.214.127"
+PORT = 1883
+MQTT_CLIENT_ID = "STREAMLIT_MYSTIC_PUB"
+
+def mqtt_publish(topic: str, payload: dict, qos: int = 0, retain: bool = False):
+    """Conecta al broker, publica el mensaje (JSON) y se desconecta."""
+    try:
+        client = paho.Client(MQTT_CLIENT_ID)
+        client.on_publish = lambda c, u, r: print("Publicado:", topic, payload)
+        client.connect(BROKER, PORT, keepalive=60)
+        payload_str = json.dumps(payload)
+        client.publish(topic, payload_str, qos=qos, retain=retain)
+        client.disconnect()
+        return True, None
+    except Exception as e:
+        return False, str(e)
+
+# ============================
+# Variables / session_state inicial
+# ============================
+if 'analysis_done' not in st.session_state:
+    st.session_state.analysis_done = False
+if 'full_response' not in st.session_state:
+    st.session_state.full_response = ""
+if 'base64_image' not in st.session_state:
+    st.session_state.base64_image = ""
+if 'probability_result' not in st.session_state:
+    st.session_state.probability_result = None
+if 'servo_angle' not in st.session_state:
+    st.session_state.servo_angle = None
+if 'last_mqtt_publish' not in st.session_state:
+    st.session_state.last_mqtt_publish = ""
+if 'slider_value' not in st.session_state:
+    st.session_state.slider_value = 0.0
+
+# ============================
+# Función para convertir imagen a Base64
+# ============================
 def encode_image_to_base64(image_path):
     try:
         with open(image_path, "rb") as image_file:
@@ -23,119 +81,331 @@ def encode_image_to_base64(image_path):
     except FileNotFoundError:
         return "Error: La imagen no se encontró en la ruta especificada."
 
+# ============================
+# Interfaz principal
+# ============================
+st.set_page_config(page_title='Tablero Místico', layout="wide")
 
-# Streamlit 
-st.set_page_config(page_title='Tablero Inteligente')
-st.title('Tablero Inteligente')
+# Fondo del bosque mágico (cambia el nombre si tu archivo se llama distinto)
+set_background("fondo_bosque.png")
+
+st.title(' ꩜ Tablero Místico de Predicciones ꩜ ')
+
+st.markdown("""
+Bienvenido/a al Oráculo Digital  
+✶✶✶ Lo que traces aquí no será un simple dibujo...  
+Cada línea, cada trazo y cada forma revelará algo oculto en tu mente, y con ello... tu destino.  
+""")
+
+# Sidebar
 with st.sidebar:
-    st.subheader("Acerca de:")
-    st.subheader("En esta aplicación veremos la capacidad que ahora tiene una máquina de interpretar un boceto")
-st.subheader("Dibuja el boceto en el panel  y presiona el botón para analizarla")
+    st.subheader("Herramientas de tu destino")
+    stroke_width = st.slider('Grosor de la pluma', 1, 30, 5)
+    stroke_color = st.color_picker("Color de tu energía", "#000000")
+    bg_color = st.color_picker("Color de tu universo", "#FFFFFF")
 
-# Add canvas component
-#bg_image = st.sidebar.file_uploader("Cargar Imagen:", type=["png", "jpg"])
-# Specify canvas parameters in application
-drawing_mode = "freedraw"
-stroke_width = st.sidebar.slider('Selecciona el ancho de línea', 1, 30, 5)
-#stroke_color = '#FFFFFF' # Set background color to white
-#bg_color = '#000000'
-stroke_color = "#000000" 
-bg_color = '#FFFFFF'
-#realtime_update = st.sidebar.checkbox("Update in realtime", True)
-
-
-# Create a canvas component
+# Canvas
 canvas_result = st_canvas(
-    fill_color="rgba(255, 165, 0, 0.3)",  # Fixed fill color with some opacity
+    fill_color="rgba(255, 165, 0, 0.3)",
     stroke_width=stroke_width,
     stroke_color=stroke_color,
     background_color=bg_color,
-    height=300,
-    width=400,
-    #background_image= None #Image.open(bg_image) if bg_image else None,
-    drawing_mode=drawing_mode,
+    height=350,
+    width=450,
+    drawing_mode="freedraw",
     key="canvas",
 )
 
-ke = st.text_input('Ingresa tu Clave')
-#os.environ['OPENAI_API_KEY'] = st.secrets['OPENAI_API_KEY']
+# API Key
+ke = st.text_input('Ingresa tu Clave Mágica (API Key)', type="password")
 os.environ['OPENAI_API_KEY'] = ke
+api_key = os.environ.get('OPENAI_API_KEY', '')
+client = None
+if api_key:
+    try:
+        client = OpenAI(api_key=api_key)
+    except Exception:
+        client = None
 
+# Botón para análisis
+analyze_button = st.button("🔮 Revela mi futuro")
 
-# Retrieve the OpenAI API Key from secrets
-api_key = os.environ['OPENAI_API_KEY']
-
-# Initialize the OpenAI client with the API key
-client = OpenAI(api_key=api_key)
-
-analyze_button = st.button("Analiza la imagen", type="secondary")
-
-# Check if an image has been uploaded, if the API key is available, and if the button has been pressed
 if canvas_result.image_data is not None and api_key and analyze_button:
-
-    with st.spinner("Analizando ..."):
-        # Encode the image
+    with st.spinner("Consultando al Oráculo..."):
         input_numpy_array = np.array(canvas_result.image_data)
-        input_image = Image.fromarray(input_numpy_array.astype('uint8'),'RGBA')
+        input_image = Image.fromarray(input_numpy_array.astype('uint8')).convert('RGBA')
         input_image.save('img.png')
-        
-      # Codificar la imagen en base64
- 
+
         base64_image = encode_image_to_base64("img.png")
-            
-        prompt_text = (f"Describe in spanish briefly the image")
-    
-      # Create the payload for the completion request
-        messages = [
-            {
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": prompt_text},
-                    {
-                        "type": "image_url",
-                        "image_url":f"data:image/png;base64,{base64_image}",
-                    },
-                ],
-            }
-        ]
-    
-        # Make the request to the OpenAI API
+        st.session_state.base64_image = base64_image
+
+        prompt_text = (
+            "Eres un oráculo místico. Basado en este dibujo, interpreta el destino del usuario. "
+            "Habla en tono enigmático y espiritual, como si estuvieras revelando un secreto profundo sobre su futuro. "
+            "Predice con metáforas, símbolos y un aire de misterio."
+        )
+
         try:
             full_response = ""
             message_placeholder = st.empty()
             response = openai.chat.completions.create(
-              model= "gpt-4o-mini",  #o1-preview ,gpt-4o-mini
-              messages=[
-                {
-                   "role": "user",
-                   "content": [
-                     {"type": "text", "text": prompt_text},
-                     {
-                       "type": "image_url",
-                       "image_url": {
-                         "url": f"data:image/png;base64,{base64_image}",
-                       },
-                     },
-                   ],
-                  }
+                model="gpt-4o-mini",
+                messages=[
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": prompt_text},
+                            {
+                                "type": "image_url",
+                                "image_url": {"url": f"data:image/png;base64,{base64_image}"},
+                            },
+                        ],
+                    }
                 ],
-              max_tokens=500,
-              )
-            #response.choices[0].message.content
-            if response.choices[0].message.content is not None:
-                    full_response += response.choices[0].message.content
-                    message_placeholder.markdown(full_response + "▌")
-            # Final update to placeholder after the stream ends
-            message_placeholder.markdown(full_response)
-            if Expert== profile_imgenh:
-               st.session_state.mi_respuesta= response.choices[0].message.content #full_response 
-    
-            # Display the response in the app
-            #st.write(response.choices[0])
-        except Exception as e:
-            st.error(f"An error occurred: {e}")
-else:
-    # Warnings for user action required
+                max_tokens=500,
+            )
 
-    if not api_key:
-        st.warning("Por favor ingresa tu API key.")
+            # Extraer contenido de forma robusta
+            try:
+                content = response.choices[0].message.content
+            except Exception:
+                content = str(response)
+
+            if content:
+                full_response += content
+                message_placeholder.markdown(full_response)
+
+            st.session_state.full_response = full_response
+            st.session_state.analysis_done = True
+
+        except Exception as e:
+            st.error(f"Ocurrió un error en la lectura de tu destino: {e}")
+
+# Mostrar resultado
+if st.session_state.analysis_done:
+    st.divider()
+    st.subheader("𓁻 Tu destino revelado 𓁻")
+    st.markdown(f"{st.session_state.full_response}")
+
+    st.divider()
+    st.subheader("¿Quieres saber qué tan probable es este futuro?")
+
+    col1, col2 = st.columns([1, 1])
+    with col1:
+        want_prob = st.button("Sí, muéstrame la probabilidad")
+    with col2:
+        advice_button = st.button("Escuchar el consejo del destino")
+
+    # CONSEJO DEL DESTINO
+    if advice_button:
+        with st.spinner("Consultando un consejo del destino..."):
+            consejo_prompt = (
+                f"Basado en esta predicción del futuro: '{st.session_state.full_response}', "
+                "genera un consejo espiritual y enigmático. "
+                "El consejo debe ser breve, inspirador y sonar como una guía del destino. "
+                "Usa metáforas y un tono místico."
+            )
+
+            try:
+                consejo_response = openai.chat.completions.create(
+                    model="gpt-4o-mini",
+                    messages=[{"role": "user", "content": consejo_prompt}],
+                    max_tokens=200,
+                )
+                try:
+                    consejo_texto = consejo_response.choices[0].message.content.strip()
+                except Exception:
+                    consejo_texto = str(consejo_response)
+            except Exception as e:
+                consejo_texto = f"No se pudo obtener un consejo del destino: {e}"
+
+        st.divider()
+        st.subheader("⋆.˚Consejo del destino⋆.˚")
+        st.markdown(consejo_texto)
+
+        # TTS
+        try:
+            tts = gTTS(consejo_texto, lang="es")
+            audio_path = "consejo_oraculo.mp3"
+            tts.save(audio_path)
+            audio_file = open(audio_path, "rb")
+            audio_bytes = audio_file.read()
+            st.audio(audio_bytes, format="audio/mp3")
+        except Exception as e:
+            st.error(f"No se pudo generar el audio: {e}")
+
+    # PROBABILIDAD
+    if want_prob:
+        if not api_key:
+            st.error("Necesitas ingresar tu Clave Mágica (API Key) para que el Oráculo calcule la probabilidad.")
+        else:
+            with st.spinner("El Oráculo está evaluando la probabilidad..."):
+                prob_prompt = (
+                    "Eres un analista místico. Lee la siguiente predicción y evalúa qué tan probable es que ese futuro "
+                    "se cumpla: \n\n"
+                    f"Predicción:\n{st.session_state.full_response}\n\n"
+                    "Devuélvelo en formato JSON simple: "
+                    "{\"label\":\"ALTO|MEDIO|BAJO\",\"confidence\":<porcentaje entre 0 y 100>,"
+                    "\"reason\":\"una frase breve explicando por qué\"}. Solo devuelve JSON."
+                )
+                try:
+                    prob_resp = openai.chat.completions.create(
+                        model="gpt-4o-mini",
+                        messages=[{"role": "user", "content": prob_prompt}],
+                        max_tokens=150,
+                    )
+
+                    # Extraer texto de respuesta de forma segura
+                    try:
+                        prob_text = prob_resp.choices[0].message.content.strip()
+                    except Exception:
+                        prob_text = str(prob_resp)
+
+                    # Intentar parsear JSON del modelo
+                    try:
+                        prob_json = json.loads(prob_text)
+                    except Exception:
+                        prob_json = {"label": "MEDIO", "confidence": 50, "reason": "Estimación mística automática."}
+
+                    # --- NORMALIZAR ETIQUETA ---
+                    raw_label = str(prob_json.get("label", "")).strip().upper()
+
+                    if "ALTO" in raw_label:
+                        normalized_label = "ALTO"
+                    elif "MEDIO" in raw_label or "MEDIA" in raw_label:
+                        normalized_label = "MEDIO"
+                    elif "BAJO" in raw_label or "BAJA" in raw_label:
+                        normalized_label = "BAJO"
+                    else:
+                        normalized_label = "MEDIO"   # fallback razonable
+
+                    # Asegurar confidence numérico entre 0 y 100
+                    raw_conf = prob_json.get("confidence", 50)
+                    try:
+                        confidence = int(float(raw_conf))
+                    except Exception:
+                        confidence = 50
+                    if confidence < 0:
+                        confidence = 0
+                    if confidence > 100:
+                        confidence = 100
+
+                    # Mapa corregido (usa etiquetas normalizadas)
+                    angle_map = {"ALTO": 160, "MEDIO": 90, "BAJO": 20}
+                    servo_angle = angle_map.get(normalized_label, 90)
+
+                    # Guardar nice JSON con etiqueta normalizada
+                    st.session_state.probability_result = {
+                        "label": normalized_label,
+                        "confidence": confidence,
+                        "reason": prob_json.get("reason", "")
+                    }
+                    st.session_state.servo_angle = servo_angle
+
+                    st.success(f"Probabilidad: **{normalized_label}** — Confianza: **{confidence}%**")
+                    st.markdown(f"**Motivo:** {prob_json.get('reason', '')}")
+                    st.markdown(f"**Ángulo sugerido para el servo (Arduino):** **{servo_angle}°**")
+
+                except Exception as e:
+                    st.error(f"No se pudo evaluar la probabilidad: {e}")
+
+    # Mostrar info Arduino si hay probabilidad
+    if st.session_state.probability_result is not None:
+        st.divider()
+        st.subheader("Implementación en Servo (Arduino)")
+        st.markdown(f"""
+        **Resumen rápido**
+        - Etiqueta: `{st.session_state.probability_result.get("label")}`  
+        - Confianza: `{st.session_state.probability_result.get("confidence")}%`  
+        - Ángulo sugerido: `{st.session_state.servo_angle}°`  
+        """)
+
+        st.markdown("""
+        **Cómo conectar el servo**
+        1. Señal (amarillo/naranja) → Pin PWM (ej. D9)  
+        2. VCC (rojo) → 5V  
+        3. GND (negro/marrón) → GND  
+        """)
+
+        # ===============================
+        # SLIDER
+        # ===============================
+        new_val = st.slider(
+            "Selecciona el rango de valores",
+            min_value=0.0,
+            max_value=100.0,
+            value=st.session_state.slider_value,
+            key="corrected_slider"
+        )
+
+        st.session_state.slider_value = new_val
+        values = st.session_state.slider_value
+        st.write("Valor seleccionado:", values)
+
+        # ===============================
+        # BOTONES MQTT
+        # ===============================
+        col_send1, col_send2 = st.columns(2)
+        with col_send1:
+            if st.button("Enviar ON al ESP32"):
+                ok, err = mqtt_publish("cmqtt_s", {"Act1": "ON"})
+                if ok:
+                    st.success("Se envió ON al ESP32")
+                else:
+                    st.error(f"No se pudo publicar: {err}")
+
+        with col_send2:
+            if st.button("Enviar OFF al ESP32"):
+                ok, err = mqtt_publish("cmqtt_s", {"Act1": "OFF"})
+                if ok:
+                    st.success("Se envió OFF al ESP32")
+                else:
+                    st.error(f"No se pudo publicar: {err}")
+
+        st.markdown("---")
+
+        # ===============================
+        # BOTÓN: Enviar ángulo sugerido
+        # ===============================
+        if st.button("Enviar ángulo sugerido al ESP32"):
+            servo_angle_deg = st.session_state.get("servo_angle", 90) or 90
+
+            # Convertir 0..180 a 0..100
+            percent_value = round((servo_angle_deg / 180.0) * 100.0, 2)
+            percent_value = max(0, min(100, percent_value))
+
+            payload = {"Analog": float(percent_value)}
+
+            ok, err = mqtt_publish("cmqtt_a", payload)
+            if ok:
+                st.success(f"Publicado {payload} en cmqtt_a")
+                st.session_state.last_mqtt_publish = f"Publicado Analog (sugerido): {payload}"
+            else:
+                st.error(f"No se pudo publicar: {err}")
+
+            st.write("DEBUG publicado:", payload)
+
+        # ===============================
+        # BOTÓN: Enviar valor manual (slider)
+        # ===============================
+        if st.button("Enviar valor manual al ESP32"):
+            try:
+                manual_val = float(values)
+            except Exception:
+                st.error("El valor del slider no es válido")
+                manual_val = None
+
+            if manual_val is not None:
+                payload = {"Analog": manual_val}
+                ok, err = mqtt_publish("cmqtt_a", payload)
+
+                if ok:
+                    st.success(f"Publicado {payload} en cmqtt_a")
+                    st.session_state.last_mqtt_publish = f"Publicado Analog manual: {payload}"
+                else:
+                    st.error(f"No se pudo publicar: {err}")
+
+                st.write("DEBUG publicado:", payload)
+
+        st.markdown("**Última publicación MQTT:**")
+        st.write(st.session_state.last_mqtt_publish)
